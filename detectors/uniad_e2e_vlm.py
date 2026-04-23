@@ -1,4 +1,5 @@
 """VLM 三级对齐损失计算模块（摘录自 uniad_e2e.py）"""
+import traceback as _tb
 import torch
 import torch.nn as nn
 
@@ -30,9 +31,13 @@ def compute_vlm_losses(self, losses, bev_embed, outs_planning, outs_motion, img_
                     vis_proj = self.vlm_proj.float()(vis_feat)
                     losses['vlm.contrastive'] = self.vlm_loss_fn(
                         vis_proj, vlm_feats.float(), valid_mask)
+    except (KeyError, AttributeError) as e:
+        # FIX-2: 预期异常（特征库未命中、接口字段缺失）仅打印简短提示
+        print(f"[VLM Loss SKIP] {type(e).__name__}: {e}")
     except Exception as e:
-        # FAIL-2: except Exception 过宽，掩盖 CUDA OOM 等严重错误
+        # FIX-2: 非预期异常打印完整 traceback，暴露潜在 bug
         print(f"[VLM Loss ERROR] {type(e).__name__}: {e}")
+        _tb.print_exc()
 
     # ── 2. Planning 级别 VLM 对齐 ────────────────────────────────────────
     if _vlm_feats is not None and _vlm_mask is not None and outs_planning is not None:
@@ -43,22 +48,26 @@ def compute_vlm_losses(self, losses, bev_embed, outs_planning, outs_motion, img_
                     plan_proj = self.planning_vlm_proj.float()(plan_q.float())
                     losses['vlm.planning'] = self.planning_vlm_loss_fn(
                         plan_proj, _vlm_feats.float(), _vlm_mask)
+        except (KeyError, AttributeError) as e:
+            print(f"[VLM Planning SKIP] {type(e).__name__}: {e}")
         except Exception as e:
-            # FAIL-2: 同上
             print(f"[VLM Planning ERROR] {type(e).__name__}: {e}")
+            _tb.print_exc()
 
     # ── 3. Motion 级别 VLM 对齐 ──────────────────────────────────────────
     if _vlm_feats is not None and _vlm_mask is not None and outs_motion:
         try:
             sdc_traj_q = outs_motion.get('sdc_traj_query', None)
-            if sdc_traj_q is not None and _vlm_mask.sum() > 0:
-                # FAIL-1: 缺少 len(sdc_traj_q) > 0 的边界检查
-                # 若 sdc_traj_q 为空 list/tensor，sdc_traj_q[-1] 会抛 IndexError
+            # FIX-1: 添加 len(sdc_traj_q) > 0 边界检查，防止空序列 IndexError
+            if sdc_traj_q is not None and len(sdc_traj_q) > 0 and _vlm_mask.sum() > 0:
                 motion_feat = sdc_traj_q[-1].mean(dim=1)
                 with torch.cuda.amp.autocast(enabled=False):
                     motion_proj = self.motion_vlm_proj.float()(motion_feat.float())
                     losses['vlm.motion'] = self.motion_vlm_loss_fn(
                         motion_proj, _vlm_feats.float(), _vlm_mask)
+        except (KeyError, AttributeError) as e:
+            print(f"[VLM Motion SKIP] {type(e).__name__}: {e}")
         except Exception as e:
-            # FAIL-2: 同上
+            # FIX-2: 非预期异常打印完整 traceback
             print(f"[VLM Motion ERROR] {type(e).__name__}: {e}")
+            _tb.print_exc()
